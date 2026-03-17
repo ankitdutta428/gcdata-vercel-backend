@@ -1,0 +1,14 @@
+{
+  "builds": [
+    {
+      "src": "new_executive_tab_api.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "new_executive_tab_api.py"
+    }
+  ]
+}
