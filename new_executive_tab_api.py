@@ -98,8 +98,8 @@ def get_executive_tab_data(
     created_duration_s  = safe_float(top[7])
     published_duration_s = safe_float(top[8])
 
-    activity_score = round(created / uploads, 2) if uploads > 0 else 0
-    quality_score  = round(published / uploads, 2) if uploads > 0 else 0
+    activity_score = created / uploads if uploads > 0 else 0
+    quality_score  = published/uploads if uploads > 0 else 0
 
     # -------------------------------------------------------------------------
     # 2. Breakdowns
