@@ -1,9 +1,10 @@
 import os
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import RedirectResponse
-from datetime import datetime
+from datetime import datetime, timedelta
 import uvicorn
 from decimal import Decimal
+from typing import Optional
 
 # Import the existing query builder from analytics
 from analytics import analytics_query
@@ -26,8 +27,6 @@ def safe_int(val):
         return 0
     return int(val)
 
-from typing import Optional
-from datetime import datetime, timedelta
 
 @app.get("/api/executive_tab")
 def get_executive_tab_data(
@@ -49,52 +48,64 @@ def get_executive_tab_data(
             start_dt = datetime.strptime(start_date, "%Y-%m-%d")
         else:
             start_dt = end_dt - timedelta(days=30)
-            # Normalize to start of day
             start_dt = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-            
+
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
 
-    # Base date filters for analytics_query
+    # Base date filters
     date_filters = [
         ("created_ts", ">=", start_dt),
         ("created_ts", "<=", end_dt)
     ]
-    
+
     table_name = "video_list_data_synthesized"
 
-    # 1. Top Level Metrics (Removed Avg Time to Publish)
+    # -------------------------------------------------------------------------
+    # 1. Top Level Metrics
+    #    - Counts for uploads / created / published
+    #    - Duration totals split by uploaded / created / published in ONE query
+    # -------------------------------------------------------------------------
     top_metrics_select = [
-        "COUNT(DISTINCT source)",
-        "COUNT(video_id)",
-        "COUNT(video_id) FILTER (WHERE published = 'Yes')",
-        "COUNT(DISTINCT channel)",
-        "COUNT(DISTINCT uploaded_by)",
-        "COUNT(DISTINCT type)",
-        "SUM(duration_s)"
+        # Counts
+        "COUNT(DISTINCT source)",                               # 0 - uploads
+        "COUNT(video_id)",                                      # 1 - created
+        "COUNT(video_id) FILTER (WHERE published = 'Yes')",     # 2 - published
+        "COUNT(DISTINCT channel)",                              # 3 - active channels
+        "COUNT(DISTINCT uploaded_by)",                          # 4 - active users
+        "COUNT(DISTINCT type)",                                 # 5 - output types count
+        # Duration totals
+        "SUM(duration_s)",                                      # 6 - total uploaded duration (all rows)
+        "SUM(duration_s)",                                      # 7 - total created duration (same — all rows are created)
+        "SUM(duration_s) FILTER (WHERE published = 'Yes')",     # 8 - total published duration
     ]
-    
+
     top_metrics_res = analytics_query(
         custom_select=top_metrics_select,
         table=table_name,
         filters=date_filters
     )
-    
-    top = top_metrics_res[0] if top_metrics_res else (0, 0, 0, 0, 0, 0, 0.0)
-    
-    uploads = safe_int(top[0])
-    created = safe_int(top[1])
-    published = safe_int(top[2])
-    active_channels = safe_int(top[3])
-    active_users = safe_int(top[4])
-    count_output_types = safe_int(top[5])
-    total_duration_s = safe_float(top[6])
+
+    top = top_metrics_res[0] if top_metrics_res else (0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0)
+
+    uploads             = safe_int(top[0])
+    created             = safe_int(top[1])
+    published           = safe_int(top[2])
+    active_channels     = safe_int(top[3])
+    active_users        = safe_int(top[4])
+    count_output_types  = safe_int(top[5])
+    uploaded_duration_s = safe_float(top[6])
+    created_duration_s  = safe_float(top[7])
+    published_duration_s = safe_float(top[8])
 
     activity_score = round(created / uploads, 2) if uploads > 0 else 0
-    quality_score = round(published / uploads, 2) if uploads > 0 else 0
+    quality_score  = round(published / uploads, 2) if uploads > 0 else 0
 
+    # -------------------------------------------------------------------------
     # 2. Breakdowns
-    # Output/Input Types
+    # -------------------------------------------------------------------------
+
+    # Output / Input Types
     output_types_res = analytics_query(
         dimensions=["type"],
         custom_select=["COUNT(video_id)", "SUM(duration_s)"],
@@ -104,9 +115,16 @@ def get_executive_tab_data(
         sort="COUNT(video_id)",
         order="DESC"
     )
-    output_types = [{"type": r[0] if r[0] else "Unknown", "count": safe_int(r[1]), "total_duration_s": safe_float(r[2])} for r in output_types_res]
+    output_types = [
+        {
+            "type": r[0] if r[0] else "Unknown",
+            "count": safe_int(r[1]),
+            "total_duration_s": safe_float(r[2])
+        }
+        for r in output_types_res
+    ]
 
-    # Languages (Added Duration)
+    # Languages
     languages_res = analytics_query(
         dimensions=["language"],
         custom_select=["COUNT(video_id)", "SUM(duration_s)"],
@@ -116,11 +134,21 @@ def get_executive_tab_data(
         sort="COUNT(video_id)",
         order="DESC"
     )
-    languages = [{"language": r[0] if r[0] else "Unknown", "count": safe_int(r[1]), "total_duration_s": safe_float(r[2])} for r in languages_res]
+    languages = [
+        {
+            "language": r[0] if r[0] else "Unknown",
+            "count": safe_int(r[1]),
+            "total_duration_s": safe_float(r[2])
+        }
+        for r in languages_res
+    ]
 
-    # Social Platforms (Added Duration)
+    # Social Platforms
     platform_filters = date_filters.copy()
-    platform_filters.extend([("published", "=", "Yes"), ("published_platform", "IS NOT NULL", "")])
+    platform_filters.extend([
+        ("published", "=", "Yes"),
+        ("published_platform", "IS NOT NULL", "")
+    ])
     platforms_res = analytics_query(
         dimensions=["published_platform"],
         custom_select=["COUNT(video_id)", "SUM(duration_s)"],
@@ -130,22 +158,32 @@ def get_executive_tab_data(
         sort="COUNT(video_id)",
         order="DESC"
     )
-    platforms = [{"platform": r[0], "count": safe_int(r[1]), "total_duration_s": safe_float(r[2])} for r in platforms_res]
+    platforms = [
+        {
+            "platform": r[0],
+            "count": safe_int(r[1]),
+            "total_duration_s": safe_float(r[2])
+        }
+        for r in platforms_res
+    ]
 
-    # 3. Trends (Product Usage Trends)
-    # Interval constraint: 'day' for everything, unless 'quarter' is selected (then use 'month')
+    # -------------------------------------------------------------------------
+    # 3. Trends
+    # -------------------------------------------------------------------------
     if interval.lower() == "quarter":
         trunc_interval = "month"
     else:
         trunc_interval = "day"
-    
+
     trends_res = analytics_query(
         custom_select=[
             f"DATE_TRUNC('{trunc_interval}', created_ts) as period",
-            "COUNT(DISTINCT source)",
-            "COUNT(video_id)",
-            "COUNT(video_id) FILTER (WHERE published = 'Yes')",
-            "SUM(duration_s)"
+            "COUNT(DISTINCT source)",                               # uploads
+            "COUNT(video_id)",                                      # created
+            "COUNT(video_id) FILTER (WHERE published = 'Yes')",     # published
+            "SUM(duration_s)",                                      # uploaded duration
+            "SUM(duration_s)",                                      # created duration
+            "SUM(duration_s) FILTER (WHERE published = 'Yes')",     # published duration
         ],
         table=table_name,
         filters=date_filters,
@@ -153,7 +191,7 @@ def get_executive_tab_data(
         sort="period",
         order="ASC"
     )
-    
+
     trends = []
     for r in trends_res:
         if r[0]:
@@ -163,10 +201,14 @@ def get_executive_tab_data(
                 "uploads": safe_int(r[1]),
                 "created": safe_int(r[2]),
                 "published": safe_int(r[3]),
-                "total_duration_s": safe_float(r[4])
+                "uploaded_duration_s": safe_float(r[4]),
+                "created_duration_s": safe_float(r[5]),
+                "published_duration_s": safe_float(r[6]),
             })
 
-    # 4. Hourly Distribution (Added Duration)
+    # -------------------------------------------------------------------------
+    # 4. Hourly Distribution
+    # -------------------------------------------------------------------------
     hourly_res = analytics_query(
         custom_select=[
             "EXTRACT(HOUR FROM created_ts) as hour",
@@ -179,8 +221,18 @@ def get_executive_tab_data(
         sort="EXTRACT(HOUR FROM created_ts)",
         order="ASC"
     )
-    hourly = [{"hour": safe_int(r[0]), "count": safe_int(r[1]), "total_duration_s": safe_float(r[2])} for r in hourly_res if r[0] is not None]
+    hourly = [
+        {
+            "hour": safe_int(r[0]),
+            "count": safe_int(r[1]),
+            "total_duration_s": safe_float(r[2])
+        }
+        for r in hourly_res if r[0] is not None
+    ]
 
+    # -------------------------------------------------------------------------
+    # Response
+    # -------------------------------------------------------------------------
     return {
         "overview": {
             "total_uploads": uploads,
@@ -192,23 +244,29 @@ def get_executive_tab_data(
             "quality_score": quality_score,
             "no_of_output_types": {
                 "count": count_output_types,
-                "total_duration_s": total_duration_s
+            },
+            # ✅ NEW: duration totals split by status
+            "duration_summary": {
+                "uploaded_duration_s": uploaded_duration_s,
+                "created_duration_s": created_duration_s,
+                "published_duration_s": published_duration_s,
             }
         },
         "breakdowns": {
             "output_types": output_types,
-            "input_types": output_types, 
+            "input_types": output_types,
             "languages": languages,
             "social_platforms": platforms
         },
         "trends": {
             "interval": interval,
             "truncation_used": trunc_interval,
-            "usage_trends": trends,
+            "usage_trends": trends,       # ✅ each period now has uploaded/created/published_duration_s
             "hourly_distribution": hourly
         }
     }
     
+
 @app.get("/api/debug")
 def debug():
     import os
@@ -220,6 +278,7 @@ def debug():
             return {"status": "connected", "result": cursor.fetchone()}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
 
 if __name__ == "__main__":
     uvicorn.run("new_executive_tab_api:app", host="0.0.0.0", port=8000, reload=True)
