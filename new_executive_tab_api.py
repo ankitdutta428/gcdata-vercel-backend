@@ -208,6 +208,18 @@ def get_executive_tab_data(
             "hourly_distribution": hourly
         }
     }
+    
+@app.get("/api/debug")
+def debug():
+    import os
+    try:
+        from analytics import get_connection
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            return {"status": "connected", "result": cursor.fetchone()}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run("new_executive_tab_api:app", host="0.0.0.0", port=8000, reload=True)
